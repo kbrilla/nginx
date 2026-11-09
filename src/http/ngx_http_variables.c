@@ -103,6 +103,8 @@ static ngx_int_t ngx_http_variable_request_body(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_variable_request_body_file(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_variable_request_body_hash(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_variable_request_length(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_variable_request_time(ngx_http_request_t *r,
@@ -305,6 +307,10 @@ static ngx_http_variable_t  ngx_http_core_variables[] = {
     { ngx_string("request_body_file"), NULL,
       ngx_http_variable_request_body_file,
       0, 0, 0 },
+
+    { ngx_string("request_body_hash"), NULL,
+      ngx_http_variable_request_body_hash,
+      0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
     { ngx_string("request_length"), NULL, ngx_http_variable_request_length,
       0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
@@ -2245,6 +2251,35 @@ ngx_http_variable_request_body_file(ngx_http_request_t *r,
 
 
 static ngx_int_t
+ngx_http_variable_request_body_hash(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    u_char  *p;
+
+    if (r->request_body == NULL || r->request_body->hash == NULL) {
+        v->not_found = 1;
+
+        return NGX_OK;
+    }
+
+    p = ngx_pnalloc(r->pool, 2 * NGX_HTTP_REQUEST_BODY_HASH_LEN);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_hex_dump(p, r->request_body->hash, NGX_HTTP_REQUEST_BODY_HASH_LEN);
+
+    v->len = 2 * NGX_HTTP_REQUEST_BODY_HASH_LEN;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = p;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 ngx_http_variable_request_length(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
@@ -2862,6 +2897,16 @@ ngx_http_variables_init_vars(ngx_conf_t *cf)
 
     next:
         continue;
+    }
+
+
+    /* $request_body_hash enables hashing of all request bodies */
+
+    for (i = 0; i < cmcf->variables.nelts; i++) {
+        if (v[i].get_handler == ngx_http_variable_request_body_hash) {
+            cmcf->request_body_hash = 1;
+            break;
+        }
     }
 
 

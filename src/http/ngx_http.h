@@ -11,6 +11,7 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
+#include <ngx_sha1.h>
 
 
 typedef struct ngx_http_request_s     ngx_http_request_t;
@@ -153,6 +154,12 @@ ngx_int_t ngx_http_send_special(ngx_http_request_t *r, ngx_uint_t flags);
 ngx_int_t ngx_http_read_client_request_body(ngx_http_request_t *r,
     ngx_http_client_body_handler_pt post_handler);
 ngx_int_t ngx_http_read_unbuffered_request_body(ngx_http_request_t *r);
+ngx_http_request_body_hash_t *ngx_http_request_body_hash_create(
+    ngx_http_request_t *r);
+ngx_int_t ngx_http_request_body_hash_update(ngx_http_request_t *r,
+    ngx_http_request_body_hash_t *h, u_char *data, size_t len);
+ngx_int_t ngx_http_request_body_hash_final(ngx_http_request_t *r,
+    ngx_http_request_body_hash_t *h, u_char *result);
 
 ngx_int_t ngx_http_send_header(ngx_http_request_t *r);
 ngx_int_t ngx_http_send_early_hints(ngx_http_request_t *r);

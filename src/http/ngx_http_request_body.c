@@ -19,6 +19,10 @@ static ngx_int_t ngx_http_read_discarded_request_body(ngx_http_request_t *r);
 static ngx_int_t ngx_http_discard_request_body_filter(ngx_http_request_t *r,
     ngx_buf_t *b);
 static ngx_int_t ngx_http_test_expect(ngx_http_request_t *r);
+static ngx_int_t ngx_http_request_body_hash_done(ngx_http_request_t *r);
+#if (NGX_OPENSSL)
+static void ngx_http_request_body_hash_cleanup(void *data);
+#endif
 
 static ngx_int_t ngx_http_request_body_filter(ngx_http_request_t *r,
     ngx_chain_t *in);
@@ -32,13 +36,14 @@ ngx_int_t
 ngx_http_read_client_request_body(ngx_http_request_t *r,
     ngx_http_client_body_handler_pt post_handler)
 {
-    size_t                     preread;
-    ssize_t                    size;
-    ngx_int_t                  rc;
-    ngx_buf_t                 *b;
-    ngx_chain_t                out;
-    ngx_http_request_body_t   *rb;
-    ngx_http_core_loc_conf_t  *clcf;
+    size_t                      preread;
+    ssize_t                     size;
+    ngx_int_t                   rc;
+    ngx_buf_t                  *b;
+    ngx_chain_t                 out;
+    ngx_http_request_body_t    *rb;
+    ngx_http_core_loc_conf_t   *clcf;
+    ngx_http_core_main_conf_t  *cmcf;
 
     r->main->count++;
 
@@ -68,6 +73,8 @@ ngx_http_read_client_request_body(ngx_http_request_t *r,
      *     rb->free = NULL;
      *     rb->busy = NULL;
      *     rb->chunked = NULL;
+     *     rb->hash_ctx = NULL;
+     *     rb->hash = NULL;
      *     rb->received = 0;
      *     rb->filter_need_buffering = 0;
      *     rb->last_sent = 0;
@@ -77,9 +84,25 @@ ngx_http_read_client_request_body(ngx_http_request_t *r,
     rb->rest = -1;
     rb->post_handler = post_handler;
 
+    cmcf = ngx_http_get_module_main_conf(r, ngx_http_core_module);
+
+    if (r->method == NGX_HTTP_QUERY || cmcf->request_body_hash) {
+        rb->hash_ctx = ngx_http_request_body_hash_create(r);
+        if (rb->hash_ctx == NULL) {
+            rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            goto done;
+        }
+    }
+
     r->request_body = rb;
 
     if (r->headers_in.content_length_n < 0 && !r->headers_in.chunked) {
+
+        if (rb->hash_ctx && ngx_http_request_body_hash_done(r) != NGX_OK) {
+            rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            goto done;
+        }
+
         r->request_body_no_buffering = 0;
         post_handler(r);
         return NGX_OK;
@@ -1322,6 +1345,25 @@ ngx_http_request_body_save_filter(ngx_http_request_t *r, ngx_chain_t *in)
                        cl->buf->file_pos,
                        cl->buf->file_last - cl->buf->file_pos);
 
+        if (rb->hash_ctx) {
+
+            if (ngx_buf_in_memory(cl->buf)) {
+                if (ngx_http_request_body_hash_update(r, rb->hash_ctx,
+                                                      cl->buf->pos,
+                                                      ngx_buf_size(cl->buf))
+                    != NGX_OK)
+                {
+                    *ll = NULL;
+                    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+                }
+
+            } else if (ngx_buf_size(cl->buf)) {
+                ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                               "http request body hash disabled");
+                rb->hash_ctx = NULL;
+            }
+        }
+
         if (cl->buf->last_buf) {
 
             if (rb->last_saved) {
@@ -1332,6 +1374,11 @@ ngx_http_request_body_save_filter(ngx_http_request_t *r, ngx_chain_t *in)
             }
 
             rb->last_saved = 1;
+
+            if (rb->hash_ctx && ngx_http_request_body_hash_done(r) != NGX_OK) {
+                *ll = NULL;
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
         }
 
         tl = ngx_alloc_chain_link(r->pool);
@@ -1399,3 +1446,147 @@ ngx_http_request_body_save_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
     return NGX_OK;
 }
+
+
+static ngx_int_t
+ngx_http_request_body_hash_done(ngx_http_request_t *r)
+{
+    u_char                   *hash;
+    ngx_http_request_body_t  *rb;
+
+    rb = r->request_body;
+
+    hash = ngx_pnalloc(r->pool, NGX_HTTP_REQUEST_BODY_HASH_LEN);
+    if (hash == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_http_request_body_hash_final(r, rb->hash_ctx, hash) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    rb->hash_ctx = NULL;
+    rb->hash = hash;
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http request body hash: %*xs",
+                   (size_t) NGX_HTTP_REQUEST_BODY_HASH_LEN, rb->hash);
+
+    return NGX_OK;
+}
+
+
+ngx_http_request_body_hash_t *
+ngx_http_request_body_hash_create(ngx_http_request_t *r)
+{
+    ngx_http_request_body_hash_t  *h;
+#if (NGX_OPENSSL)
+    ngx_pool_cleanup_t            *cln;
+#endif
+
+#if (NGX_OPENSSL)
+
+    /* the cleanup frees the context if the digest is never finalized */
+
+    cln = ngx_pool_cleanup_add(r->pool, sizeof(ngx_http_request_body_hash_t));
+    if (cln == NULL) {
+        return NULL;
+    }
+
+    h = cln->data;
+
+    h->md = EVP_MD_CTX_create();
+    if (h->md == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "EVP_MD_CTX_create() failed");
+        return NULL;
+    }
+
+    cln->handler = ngx_http_request_body_hash_cleanup;
+
+    if (EVP_DigestInit_ex(h->md, EVP_sha256(), NULL) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "EVP_DigestInit_ex() failed");
+        return NULL;
+    }
+
+#else
+
+    h = ngx_palloc(r->pool, sizeof(ngx_http_request_body_hash_t));
+    if (h == NULL) {
+        return NULL;
+    }
+
+    ngx_sha1_init(&h->sha1);
+
+#endif
+
+    return h;
+}
+
+
+ngx_int_t
+ngx_http_request_body_hash_update(ngx_http_request_t *r,
+    ngx_http_request_body_hash_t *h, u_char *data, size_t len)
+{
+#if (NGX_OPENSSL)
+
+    if (EVP_DigestUpdate(h->md, data, len) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "EVP_DigestUpdate() failed");
+        return NGX_ERROR;
+    }
+
+#else
+
+    ngx_sha1_update(&h->sha1, data, len);
+
+#endif
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+ngx_http_request_body_hash_final(ngx_http_request_t *r,
+    ngx_http_request_body_hash_t *h, u_char *result)
+{
+#if (NGX_OPENSSL)
+
+    if (EVP_DigestFinal_ex(h->md, result, NULL) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "EVP_DigestFinal_ex() failed");
+        return NGX_ERROR;
+    }
+
+    EVP_MD_CTX_destroy(h->md);
+    h->md = NULL;
+
+#else
+
+    ngx_sha1_final(result, &h->sha1);
+
+#endif
+
+    return NGX_OK;
+}
+
+
+#if (NGX_OPENSSL)
+
+static void
+ngx_http_request_body_hash_cleanup(void *data)
+{
+    ngx_http_request_body_hash_t  *h;
+
+    h = data;
+
+    if (h->md) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
+                       "http request body hash cleanup");
+
+        EVP_MD_CTX_destroy(h->md);
+    }
+}
+
+#endif

@@ -302,6 +302,23 @@ typedef struct {
 
 typedef void (*ngx_http_client_body_handler_pt)(ngx_http_request_t *r);
 
+
+#if (NGX_OPENSSL)
+#define NGX_HTTP_REQUEST_BODY_HASH_LEN  32
+#else
+#define NGX_HTTP_REQUEST_BODY_HASH_LEN  20
+#endif
+
+
+typedef struct {
+#if (NGX_OPENSSL)
+    EVP_MD_CTX                       *md;
+#else
+    ngx_sha1_t                        sha1;
+#endif
+} ngx_http_request_body_hash_t;
+
+
 typedef struct {
     ngx_temp_file_t                  *temp_file;
     ngx_chain_t                      *bufs;
@@ -312,6 +329,8 @@ typedef struct {
     ngx_chain_t                      *busy;
     ngx_http_chunked_t               *chunked;
     ngx_http_client_body_handler_pt   post_handler;
+    ngx_http_request_body_hash_t     *hash_ctx;
+    u_char                           *hash;
     unsigned                          filter_need_buffering:1;
     unsigned                          last_sent:1;
     unsigned                          last_saved:1;

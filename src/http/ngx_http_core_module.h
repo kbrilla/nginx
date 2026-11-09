@@ -176,6 +176,8 @@ typedef struct {
     ngx_array_t               *ports;
 
     ngx_http_phase_t           phases[NGX_HTTP_LOG_PHASE + 1];
+
+    unsigned                   request_body_hash:1;
 } ngx_http_core_main_conf_t;
 
 
