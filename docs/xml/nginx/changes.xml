@@ -5,6 +5,37 @@
 <change_log title="nginx">
 
 
+<changes ver="1.31.9" date="">
+
+<change type="feature">
+<para lang="ru">
+поддержка метода QUERY (RFC 10008);
+ответы на запросы QUERY можно кэшировать,
+если метод указан в директивах proxy_cache_methods, fastcgi_cache_methods,
+scgi_cache_methods и uwsgi_cache_methods,
+при этом в ключ кэширования добавляется хэш тела запроса.
+</para>
+<para lang="en">
+the QUERY method (RFC 10008) support;
+responses to QUERY requests can be cached
+if the method is specified in the "proxy_cache_methods",
+"fastcgi_cache_methods", "scgi_cache_methods", and "uwsgi_cache_methods"
+directives, a hash of the request body is added to the cache key.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменная $request_body_hash.
+</para>
+<para lang="en">
+the $request_body_hash variable.
+</para>
+</change>
+
+</changes>
+
+
 <changes ver="1.31.8" date="2026-10-21">
 
 <change>
