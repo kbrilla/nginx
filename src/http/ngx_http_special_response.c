@@ -623,6 +623,12 @@ ngx_http_send_error_page(ngx_http_request_t *r, ngx_http_err_page_t *err_page)
             args = err_page->args;
         }
 
+        if (r->method == NGX_HTTP_QUERY
+            && ngx_http_drop_request_body(r) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
         if (r->method != NGX_HTTP_HEAD) {
             r->method = NGX_HTTP_GET;
             r->method_name = ngx_http_core_get_method;

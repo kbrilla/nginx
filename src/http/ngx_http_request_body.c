@@ -731,6 +731,61 @@ ngx_http_discard_request_body(ngx_http_request_t *r)
 }
 
 
+ngx_int_t
+ngx_http_drop_request_body(ngx_http_request_t *r)
+{
+    ngx_http_request_body_t  *rb;
+
+    /*
+     * makes the request look like a request without a body, so the body
+     * is not passed to another location after the method is changed
+     */
+
+    if (r->discard_body) {
+        return NGX_OK;
+    }
+
+    if (r == r->main
+        && (r->headers_in.content_length_n > 0 || r->headers_in.chunked)
+        && (r->request_body == NULL || !r->request_body->last_saved))
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "http drop request body");
+
+        /* the rest of the body is never read */
+
+#if (NGX_HTTP_V2)
+        if (r->stream) {
+            r->stream->skip_data = 1;
+        }
+#endif
+
+        r->keepalive = 0;
+        r->lingering_close = 1;
+
+        if (r->reading_body) {
+            r->read_event_handler = ngx_http_block_reading;
+        }
+    }
+
+    rb = ngx_pcalloc(r->pool, sizeof(ngx_http_request_body_t));
+    if (rb == NULL) {
+        return NGX_ERROR;
+    }
+
+    r->request_body = rb;
+    r->reading_body = 0;
+    r->request_body_no_buffering = 0;
+
+    r->headers_in.content_length = NULL;
+    r->headers_in.content_length_n = 0;
+    r->headers_in.transfer_encoding = NULL;
+    r->headers_in.chunked = 0;
+
+    return NGX_OK;
+}
+
+
 void
 ngx_http_discarded_request_body_handler(ngx_http_request_t *r)
 {

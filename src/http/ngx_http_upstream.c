@@ -3338,6 +3338,13 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
                 return NGX_DONE;
             }
 
+            if (r->method == NGX_HTTP_QUERY
+                && ngx_http_drop_request_body(r) != NGX_OK)
+            {
+                ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                return NGX_DONE;
+            }
+
             if (r->method != NGX_HTTP_HEAD) {
                 r->method = NGX_HTTP_GET;
                 r->method_name = ngx_http_core_get_method;
