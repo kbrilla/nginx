@@ -402,7 +402,9 @@ ngx_http_slice_range_variable(ngx_http_request_t *r,
     ctx = ngx_http_get_module_ctx(r, ngx_http_slice_filter_module);
 
     if (ctx == NULL) {
-        if (r != r->main || r->headers_out.status) {
+        if (r != r->main || r->headers_out.status
+            || r->method == NGX_HTTP_QUERY)
+        {
             v->not_found = 1;
             return NGX_OK;
         }
