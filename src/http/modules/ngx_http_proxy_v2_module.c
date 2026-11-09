@@ -306,6 +306,18 @@ ngx_http_proxy_v2_handler(ngx_http_request_t *r)
         r->request_body_no_buffering = 1;
     }
 
+#if (NGX_HTTP_CACHE)
+
+    if (r->method == NGX_HTTP_QUERY
+        && plcf->upstream.cache
+        && (plcf->upstream.cache_methods & NGX_HTTP_QUERY))
+    {
+        /* the cache key of a QUERY request needs the whole body */
+        r->request_body_no_buffering = 0;
+    }
+
+#endif
+
     rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
 
     if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {

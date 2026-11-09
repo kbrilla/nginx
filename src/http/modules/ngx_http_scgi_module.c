@@ -569,6 +569,18 @@ ngx_http_scgi_handler(ngx_http_request_t *r)
         r->request_body_no_buffering = 1;
     }
 
+#if (NGX_HTTP_CACHE)
+
+    if (r->method == NGX_HTTP_QUERY
+        && scf->upstream.cache
+        && (scf->upstream.cache_methods & NGX_HTTP_QUERY))
+    {
+        /* the cache key of a QUERY request needs the whole body */
+        r->request_body_no_buffering = 0;
+    }
+
+#endif
+
     rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
 
     if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
@@ -1690,6 +1702,21 @@ ngx_http_scgi_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                          prev->upstream.pass_request_headers, 1);
     ngx_conf_merge_value(conf->upstream.pass_request_body,
                          prev->upstream.pass_request_body, 1);
+
+#if (NGX_HTTP_CACHE)
+
+    if (conf->upstream.cache
+        && (conf->upstream.cache_methods & NGX_HTTP_QUERY)
+        && !conf->upstream.pass_request_body)
+    {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "QUERY requests are not cached "
+                           "with \"scgi_pass_request_body off\"");
+
+        conf->upstream.cache_methods &= ~NGX_HTTP_QUERY;
+    }
+
+#endif
 
     ngx_conf_merge_value(conf->upstream.intercept_errors,
                          prev->upstream.intercept_errors, 0);

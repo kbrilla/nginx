@@ -15,6 +15,7 @@ static ngx_int_t ngx_http_upstream_cache(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
 static ngx_int_t ngx_http_upstream_cache_get(ngx_http_request_t *r,
     ngx_http_upstream_t *u, ngx_http_file_cache_t **cache);
+static ngx_int_t ngx_http_upstream_cache_query_key(ngx_http_request_t *r);
 static ngx_int_t ngx_http_upstream_cache_send(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
 static ngx_int_t ngx_http_upstream_cache_background_update(
@@ -494,8 +495,21 @@ ngx_conf_bitmask_t  ngx_http_upstream_cache_method_mask[] = {
     { ngx_string("GET"), NGX_HTTP_GET },
     { ngx_string("HEAD"), NGX_HTTP_HEAD },
     { ngx_string("POST"), NGX_HTTP_POST },
+    { ngx_string("QUERY"), NGX_HTTP_QUERY },
     { ngx_null_string, 0 }
 };
+
+
+#if (NGX_HTTP_CACHE)
+
+static ngx_str_t  ngx_http_upstream_cache_query_headers[] = {
+    ngx_string("Content-Type"),
+    ngx_string("Content-Encoding"),
+    ngx_string("Content-Language"),
+    ngx_null_string
+};
+
+#endif
 
 
 ngx_conf_bitmask_t  ngx_http_upstream_ignore_headers_masks[] = {
@@ -651,6 +665,10 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
 #endif
 
     u->store = u->conf->store;
+
+    if (r->method == NGX_HTTP_QUERY) {
+        u->store = 0;
+    }
 
     if (!u->store && !r->post_action && !u->conf->ignore_client_abort) {
 
@@ -896,12 +914,42 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
             u->method = ngx_http_core_get_method;
         }
 
+        if (r->method == NGX_HTTP_QUERY
+            && (r->request_body == NULL || r->request_body->hash == NULL))
+        {
+            if (r->request_body && r->request_body->hash_ctx) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "QUERY request body is incomplete, "
+                              "not caching");
+
+            } else {
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                              "QUERY request body is not available, "
+                              "not caching");
+            }
+
+            return NGX_DECLINED;
+        }
+
         if (ngx_http_file_cache_new(r) != NGX_OK) {
             return NGX_ERROR;
         }
 
         if (u->create_key(r) != NGX_OK) {
             return NGX_ERROR;
+        }
+
+        if (r->method == NGX_HTTP_QUERY) {
+            rc = ngx_http_upstream_cache_query_key(r);
+
+            if (rc == NGX_DECLINED) {
+                r->cache = NULL;
+                return NGX_DECLINED;
+            }
+
+            if (rc != NGX_OK) {
+                return NGX_ERROR;
+            }
         }
 
         /* TODO: add keys */
@@ -1092,6 +1140,141 @@ ngx_http_upstream_cache_get(ngx_http_request_t *r, ngx_http_upstream_t *u,
                   "cache \"%V\" not found", &val);
 
     return NGX_ERROR;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_cache_query_key(ngx_http_request_t *r)
+{
+    u_char                        *p, *start, *end, *last, *value, buf[9];
+    u_char                         hash[NGX_HTTP_REQUEST_BODY_HASH_LEN];
+    size_t                         len;
+    ngx_str_t                     *key, *name;
+    ngx_uint_t                     i, n;
+    ngx_list_part_t               *part;
+    ngx_table_elt_t               *h;
+    ngx_http_request_body_hash_t  *ctx;
+
+    /*
+     * the key is a digest of all Content-Type, Content-Encoding and
+     * Content-Language header lines followed by the request body digest;
+     * each header line is preceded by its index and length; digest
+     * errors are not fatal, the response is not cached then
+     */
+
+    ctx = ngx_http_request_body_hash_create(r);
+    if (ctx == NULL) {
+        return NGX_DECLINED;
+    }
+
+    for (n = 0; ngx_http_upstream_cache_query_headers[n].len; n++) {
+
+        name = &ngx_http_upstream_cache_query_headers[n];
+
+        part = &r->headers_in.headers.part;
+        h = part->elts;
+
+        for (i = 0; /* void */; i++) {
+
+            if (i >= part->nelts) {
+                if (part->next == NULL) {
+                    break;
+                }
+
+                part = part->next;
+                h = part->elts;
+                i = 0;
+            }
+
+            if (h[i].hash == 0
+                || h[i].key.len != name->len
+                || ngx_strncasecmp(h[i].key.data, name->data, name->len) != 0)
+            {
+                continue;
+            }
+
+            start = h[i].value.data;
+            end = start + h[i].value.len;
+
+            while (start < end && (*start == ' ' || *start == '\t')) {
+                start++;
+            }
+
+            while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+                end--;
+            }
+
+            len = end - start;
+
+            value = ngx_pnalloc(r->pool, len);
+            if (value == NULL) {
+                return NGX_ERROR;
+            }
+
+            if (n == 0) {
+
+                /* only the media type is case-insensitive */
+
+                for (last = start; last < end; last++) {
+                    if (*last == ';' || *last == ' ' || *last == '\t') {
+                        break;
+                    }
+                }
+
+                ngx_memcpy(value, start, len);
+                ngx_strlow(value, start, last - start);
+
+            } else {
+                ngx_strlow(value, start, len);
+            }
+
+            buf[0] = (u_char) (n + 1);
+            buf[1] = (u_char) ((uint64_t) len >> 56);
+            buf[2] = (u_char) ((uint64_t) len >> 48);
+            buf[3] = (u_char) ((uint64_t) len >> 40);
+            buf[4] = (u_char) ((uint64_t) len >> 32);
+            buf[5] = (u_char) (len >> 24);
+            buf[6] = (u_char) (len >> 16);
+            buf[7] = (u_char) (len >> 8);
+            buf[8] = (u_char) len;
+
+            if (ngx_http_request_body_hash_update(r, ctx, buf, 9) != NGX_OK
+                || ngx_http_request_body_hash_update(r, ctx, value, len)
+                   != NGX_OK)
+            {
+                return NGX_DECLINED;
+            }
+        }
+    }
+
+    buf[0] = 0;
+
+    if (ngx_http_request_body_hash_update(r, ctx, buf, 1) != NGX_OK
+        || ngx_http_request_body_hash_update(r, ctx, r->request_body->hash,
+                                             NGX_HTTP_REQUEST_BODY_HASH_LEN)
+           != NGX_OK
+        || ngx_http_request_body_hash_final(r, ctx, hash) != NGX_OK)
+    {
+        return NGX_DECLINED;
+    }
+
+    key = ngx_array_push(&r->cache->keys);
+    if (key == NULL) {
+        return NGX_ERROR;
+    }
+
+    key->data = ngx_pnalloc(r->pool, sizeof(":query:") - 1
+                                     + 2 * NGX_HTTP_REQUEST_BODY_HASH_LEN);
+    if (key->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = ngx_cpymem(key->data, ":query:", sizeof(":query:") - 1);
+    p = ngx_hex_dump(p, hash, NGX_HTTP_REQUEST_BODY_HASH_LEN);
+
+    key->len = p - key->data;
+
+    return NGX_OK;
 }
 
 

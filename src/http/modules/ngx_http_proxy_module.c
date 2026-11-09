@@ -967,6 +967,18 @@ ngx_http_proxy_handler(ngx_http_request_t *r)
         r->request_body_no_buffering = 1;
     }
 
+#if (NGX_HTTP_CACHE)
+
+    if (r->method == NGX_HTTP_QUERY
+        && plcf->upstream.cache
+        && (plcf->upstream.cache_methods & NGX_HTTP_QUERY))
+    {
+        /* the cache key of a QUERY request needs the whole body */
+        r->request_body_no_buffering = 0;
+    }
+
+#endif
+
     rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
 
     if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
@@ -4137,6 +4149,23 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             return NGX_CONF_ERROR;
         }
     }
+
+#if (NGX_HTTP_CACHE)
+
+    if (conf->upstream.cache
+        && (conf->upstream.cache_methods & NGX_HTTP_QUERY)
+        && (conf->body_values || !conf->upstream.pass_request_body
+            || conf->method))
+    {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "QUERY requests are not cached with "
+                           "\"proxy_set_body\", \"proxy_method\", or "
+                           "\"proxy_pass_request_body off\"");
+
+        conf->upstream.cache_methods &= ~NGX_HTTP_QUERY;
+    }
+
+#endif
 
     ngx_conf_merge_ptr_value(conf->headers_source, prev->headers_source, NULL);
 

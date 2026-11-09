@@ -240,6 +240,18 @@ ngx_http_file_cache_create_key(ngx_http_request_t *r)
     ngx_crc32_init(c->crc32);
     ngx_md5_init(&md5);
 
+    if (r->method == NGX_HTTP_QUERY) {
+
+        /*
+         * the marker is hashed but not stored with the key, so QUERY
+         * requests never share cache entries with other methods
+         */
+
+        ngx_crc32_update(&c->crc32, (u_char *) "\0QUERY\0",
+                         sizeof("\0QUERY\0") - 1);
+        ngx_md5_update(&md5, "\0QUERY\0", sizeof("\0QUERY\0") - 1);
+    }
+
     key = c->keys.elts;
     for (i = 0; i < c->keys.nelts; i++) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
